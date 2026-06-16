@@ -1398,6 +1398,38 @@
   }
   .sync-btn:hover { background: var(--primary-light); border-color: var(--primary); }
   .sync-btn.syncing { opacity: .6; cursor: not-allowed; }
+  .sync-dropdown { position: relative; display: inline-flex; }
+  .sync-arrow { font-size: 10px; margin-left: 2px; opacity: .6; }
+  .sync-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    background: var(--card);
+    border: 1.5px solid var(--border);
+    border-radius: 12px;
+    box-shadow: 0 8px 30px rgba(0,0,0,.12);
+    min-width: 220px;
+    z-index: 300;
+    padding: 6px;
+    display: none;
+  }
+  .sync-menu.show { display: block; animation: fadeUp .15s ease; }
+  .sync-menu-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 9px 14px;
+    border: none;
+    background: none;
+    font-size: 13px;
+    font-family: inherit;
+    cursor: pointer;
+    border-radius: 8px;
+    color: var(--text);
+    transition: background .15s;
+  }
+  .sync-menu-item:hover { background: var(--primary-light); color: var(--primary); }
+  .sync-menu-sep { height: 1px; background: var(--border); margin: 4px 8px; }
   .sync-dot {
     width: 8px; height: 8px;
     border-radius: 50%;
@@ -1504,10 +1536,19 @@
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
       <span>新建记录</span>
     </button>
-    <button class="sync-btn" id="syncBtn" onclick="handleSyncClick()" title="云端同步">
-      <span class="sync-dot" id="syncDot"></span>
-      <span id="syncBtnText">同步</span>
-    </button>
+    <div class="sync-dropdown" id="syncDropdown">
+      <button class="sync-btn" id="syncBtn" onclick="toggleSyncMenu()" title="云端同步">
+        <span class="sync-dot" id="syncDot"></span>
+        <span id="syncBtnText">同步</span>
+        <span class="sync-arrow">▾</span>
+      </button>
+      <div class="sync-menu" id="syncMenu">
+        <button class="sync-menu-item" onclick="syncToGist()">📤 上传（本地 → 云端）</button>
+        <button class="sync-menu-item" onclick="syncFromGist()">📥 下载（云端 → 本地）</button>
+        <div class="sync-menu-sep"></div>
+        <button class="sync-menu-item" onclick="closeSyncMenu()">✖ 取消</button>
+      </div>
+    </div>
     <button class="sync-btn" onclick="openSettings()" title="同步设置" style="padding:8px 10px;">
       <span>⚙️</span>
     </button>
@@ -3938,7 +3979,7 @@ async function createNewGist() {
         description: '知学志 数据同步',
         public: false,
         files: {
-          'zhixuezhi-data.json': { content: JSON.stringify({ version: 2, entries: [], rituals: [] }, null, 2) }
+          'zhixuezhi-data.json': { content: JSON.stringify({ version: 2, entries: [], rituals: [] }) }
         }
       })
     });
@@ -3957,26 +3998,34 @@ async function createNewGist() {
   }
 }
 
-function handleSyncClick() {
+function toggleSyncMenu() {
   const cfg = loadSyncSettings();
-  if (!cfg.token || !cfg.gistId) {
-    openSettings();
-    return;
-  }
-  // Show sync menu
-  if (confirm('同步到云端？\n\n确定 = 上传（本地→云端）\n取消 = 下载（云端→本地）')) {
-    syncToGist();
+  if (!cfg.token || !cfg.gistId) { openSettings(); return; }
+  const menu = document.getElementById('syncMenu');
+  const isShow = menu.classList.toggle('show');
+  if (isShow) {
+    setTimeout(() => document.addEventListener('click', closeSyncMenuOutside), 10);
   } else {
-    syncFromGist();
+    document.removeEventListener('click', closeSyncMenuOutside);
   }
 }
 
+function closeSyncMenu() {
+  document.getElementById('syncMenu').classList.remove('show');
+  document.removeEventListener('click', closeSyncMenuOutside);
+}
+
+function closeSyncMenuOutside(e) {
+  if (!document.getElementById('syncDropdown').contains(e.target)) closeSyncMenu();
+}
+
 async function syncToGist() {
+  closeSyncMenu();
   const cfg = loadSyncSettings();
   if (!cfg.token || !cfg.gistId) { openSettings(); return; }
   const btn = document.getElementById('syncBtn');
   btn.classList.add('syncing');
-  showSyncStatus('正在上传数据到 Gist…', 'info');
+  showSyncStatus('正在准备上传数据…', 'info');
 
   try {
     const ritualsArr = Object.values(allRituals);
@@ -3989,10 +4038,15 @@ async function syncToGist() {
             exportedAt: new Date().toISOString(),
             entries: allEntries,
             rituals: ritualsArr,
-          }, null, 2)
+          })
         }
       }
     };
+
+    const raw = JSON.stringify(payload);
+    const sizeKB = Math.round(new Blob([raw]).size / 1024);
+    if (sizeKB > 1000) throw new Error(`数据太大（${sizeKB}KB），超过 Gist 1MB 限制。请删除部分带图片的记录后重试。`);
+    if (sizeKB > 800) showSyncStatus(`⚠️ 数据较大（${sizeKB}KB），上传中…`, 'info');
 
     const resp = await fetch(`https://api.github.com/gists/${cfg.gistId}`, {
       method: 'PATCH',
@@ -4000,7 +4054,7 @@ async function syncToGist() {
         'Authorization': `token ${cfg.token}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(payload)
+      body: raw
     });
 
     if (!resp.ok) {
@@ -4021,6 +4075,7 @@ async function syncToGist() {
 }
 
 async function syncFromGist() {
+  closeSyncMenu();
   const cfg = loadSyncSettings();
   if (!cfg.token || !cfg.gistId) { openSettings(); return; }
   const btn = document.getElementById('syncBtn');
